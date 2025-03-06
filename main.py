@@ -63,14 +63,31 @@ def detect_cd_drives():
     """Returns a list of drive letters for all detected CD/DVD drives."""
     cd_drives = []
     try:
-        output = subprocess.check_output("wmic cdrom get drive", shell=True).decode().splitlines()
-        for line in output[1:]:  # Skip header
+        # Run WMIC with explicit stdin/stdout handling to prevent hangs
+        process = subprocess.Popen(
+            "wmic cdrom get drive",
+            shell=True,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE
+        )
+        output, error = process.communicate()
+
+        # Decode and process output safely
+        lines = output.decode("utf-8", errors="ignore").splitlines()
+
+        for line in lines[1:]:  # Skip the header
             drive_letter = line.strip()
             if drive_letter and len(drive_letter) == 2 and drive_letter[1] == ":":
                 cd_drives.append(drive_letter[0])  # Extract just the letter
-    except Exception:
-        pass
+    except Exception as e:
+        logging.error("Error detecting CD/DVD drives: {}".format(e))
+
     return cd_drives
+
+
+
+
 
 
 def input_watcher():
