@@ -42,21 +42,43 @@ def kill_existing_process():
 
 
 def get_process_cpu_usage():
-    """Returns the CPU usage of the given process."""
+    """Returns the CPU usage of the given process, or None if not found."""
     try:
-        output = subprocess.check_output(
+        # Run wmic safely with a timeout
+        process = subprocess.Popen(
             "wmic process where name='{}' get KernelModeTime,UserModeTime".format(EXECUTABLE_NAME),
-            shell=True
+            shell=True,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE
         )
-        lines = output.decode().splitlines()
+        output, error = process.communicate(timeout=2)  # Timeout after 2 seconds
+
+        # Decode output safely
+        output = output.decode("utf-8", errors="ignore")
+        lines = output.splitlines()
+
+        # Debugging: Log output if it's unexpected
+        if len(lines) < 2:
+            logging.warning("Unexpected WMIC output: {}".format(output))
+            return None
+
         total_time = 0
         for line in lines[1:]:
             parts = line.strip().split()
             if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
                 total_time += int(parts[0]) + int(parts[1])
+
+        # logging.info("Got total CPU time for {}: {}".format(EXECUTABLE_NAME, total_time))
         return total_time
-    except Exception:
+
+    except subprocess.TimeoutExpired:
+        logging.error("WMIC command timed out while checking CPU usage for {}".format(EXECUTABLE_NAME))
         return None
+    except Exception as e:
+        logging.error("Error getting CPU usage for {}: {}".format(EXECUTABLE_NAME, e))
+        return None
+
 
 
 def detect_cd_drives():
@@ -119,14 +141,19 @@ def run_wmplayer_on_cd(drive_letter):
     """Launches the media player for the given CD drive and monitors activity."""
     logging.info("Starting {} for CD in drive {}:\\".format(EXECUTABLE_NAME, drive_letter))
 
-    # Use cmd.exe to launch wmplayer in the background properly
+    # Use cmd.exe to launch wmplayer properly
     command = 'start "" "{}" /device:AudioCD "{}:\\"'.format(EXECUTABLE_NAME, drive_letter)
 
-    process = subprocess.Popen(command, shell=True)
-
-    logging.info("Started {} for drive {}:\\".format(EXECUTABLE_NAME, drive_letter))
+    try:
+        process = subprocess.Popen(command, shell=True, creationflags=subprocess.CREATE_NEW_CONSOLE)
+        logging.info("Started {} for drive {}:\\".format(EXECUTABLE_NAME, drive_letter))
+    except Exception as e:
+        logging.error("Failed to start {}: {}".format(EXECUTABLE_NAME, e))
+        return
 
     time.sleep(5)  # Allow wmplayer to start
+
+    logging.info("Monitoring CPU and input activity...")  # Added log to ensure we reach this part
 
     while True:
         start_time = time.time()
@@ -156,6 +183,7 @@ def run_wmplayer_on_cd(drive_letter):
             subprocess.call("taskkill /F /IM {}".format(EXECUTABLE_NAME), shell=True)
             time.sleep(5)  # Wait before moving to the next CD
             return
+
 
 
 def main():
