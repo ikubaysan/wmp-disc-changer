@@ -12,202 +12,148 @@ logging.basicConfig(
     level=logging.INFO
 )
 
-user32 = ctypes.windll.user32
 
-# Constants for virtual keys
-VK_LBUTTON = 0x01  # Left mouse button
+class CDMonitor:
+    def __init__(self):
+        self.EXECUTABLE_NAME = "wmplayer.exe"
+        self.WATCH_CPU_USAGE_CHECK_INTERVAL_SECONDS = 3
+        self.MAX_CONSECUTIVE_IDENTICAL_CPU_READINGS = 10
+        self.watch_cpu_usage = True
+        self.cpu_usage_records = []
 
-# Track last input times
-last_mouse_click_time = time.time()
-last_keyboard_input_time = time.time()
+    def kill_existing_process(self):
+        """Kills the executable if it is already running and waits 3 seconds if killed."""
+        try:
+            output = subprocess.check_output("tasklist", shell=True).decode("utf-8", errors="ignore")
+            if self.EXECUTABLE_NAME.lower() in output.lower():
+                logging.info("{} is already running. Terminating...".format(self.EXECUTABLE_NAME))
+                subprocess.call("taskkill /F /IM {}".format(self.EXECUTABLE_NAME), shell=True)
+                time.sleep(3)
+                logging.info("{} terminated successfully.".format(self.EXECUTABLE_NAME))
+            else:
+                logging.info("{} is not running at script startup.".format(self.EXECUTABLE_NAME))
+        except Exception as e:
+            logging.error("Error while checking/killing {}: {}".format(self.EXECUTABLE_NAME, e))
 
-# Executable to monitor
-EXECUTABLE_NAME = "wmplayer.exe"
-
-
-def kill_existing_process():
-    """Kills the executable if it is already running and waits 3 seconds if killed."""
-    try:
-        # Check if the process is running
-        output = subprocess.check_output("tasklist", shell=True).decode("utf-8", errors="ignore")
-        if EXECUTABLE_NAME.lower() in output.lower():
-            logging.info("{} is already running. Terminating...".format(EXECUTABLE_NAME))
-            subprocess.call("taskkill /F /IM {}".format(EXECUTABLE_NAME), shell=True)
-            time.sleep(3)  # Wait after termination
-            logging.info("{} terminated successfully.".format(EXECUTABLE_NAME))
-        else:
-            logging.info("{} is not running at script startup.".format(EXECUTABLE_NAME))
-    except Exception as e:
-        logging.error("Error while checking/killing {}: {}".format(EXECUTABLE_NAME, e))
-
-
-def get_process_cpu_usage():
-    """Returns the CPU usage of the given process, or None if not found."""
-    try:
-        # Run wmic safely with a timeout
-        process = subprocess.Popen(
-            "wmic process where name='{}' get KernelModeTime,UserModeTime".format(EXECUTABLE_NAME),
-            shell=True,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE
-        )
-        output, error = process.communicate(timeout=2)  # Timeout after 2 seconds
-
-        # Decode output safely
-        output = output.decode("utf-8", errors="ignore")
-        lines = output.splitlines()
-
-        # Debugging: Log output if it's unexpected
-        if len(lines) < 2:
-            logging.warning("Unexpected WMIC output: {}".format(output))
+    def get_process_cpu_usage(self):
+        """Returns the CPU usage of the given process, or None if not found."""
+        try:
+            process = subprocess.Popen(
+                "wmic process where name='{}' get KernelModeTime,UserModeTime".format(self.EXECUTABLE_NAME),
+                shell=True,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE
+            )
+            output, error = process.communicate(timeout=2)
+            output = output.decode("utf-8", errors="ignore")
+            lines = output.splitlines()
+            if len(lines) < 2:
+                logging.warning("Unexpected WMIC output: {}".format(output))
+                return None
+            total_time = 0
+            for line in lines[1:]:
+                parts = line.strip().split()
+                if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
+                    total_time += int(parts[0]) + int(parts[1])
+            return total_time
+        except subprocess.TimeoutExpired:
+            logging.error("WMIC command timed out while checking CPU usage for {}".format(self.EXECUTABLE_NAME))
+            return None
+        except Exception as e:
+            logging.error("Error getting CPU usage for {}: {}".format(self.EXECUTABLE_NAME, e))
             return None
 
-        total_time = 0
-        for line in lines[1:]:
-            parts = line.strip().split()
-            if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
-                total_time += int(parts[0]) + int(parts[1])
+    def detect_cd_drives(self):
+        """Returns a list of drive letters for all detected CD/DVD drives."""
+        cd_drives = []
+        try:
+            process = subprocess.Popen(
+                "wmic cdrom get drive",
+                shell=True,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE
+            )
+            output, error = process.communicate()
+            lines = output.decode("utf-8", errors="ignore").splitlines()
+            for line in lines[1:]:  # Skip the header
+                drive_letter = line.strip()
+                if drive_letter and len(drive_letter) == 2 and drive_letter[1] == ":":
+                    cd_drives.append(drive_letter[0])
+        except Exception as e:
+            logging.error("Error detecting CD/DVD drives: {}".format(e))
+        return cd_drives
 
-        # logging.info("Got total CPU time for {}: {}".format(EXECUTABLE_NAME, total_time))
-        return total_time
+    def toggle_listener(self):
+        """Listens for the ENTER key to toggle CPU usage monitoring."""
+        while True:
+            input()  # Wait for ENTER key press
+            self.watch_cpu_usage = not self.watch_cpu_usage
+            if self.watch_cpu_usage:
+                logging.info("Resuming CPU usage monitoring.")
+            else:
+                logging.info("Pausing CPU usage monitoring. Clearing CPU usage records.")
+                self.cpu_usage_records = []  # Clear records when paused
 
-    except subprocess.TimeoutExpired:
-        logging.error("WMIC command timed out while checking CPU usage for {}".format(EXECUTABLE_NAME))
-        return None
-    except Exception as e:
-        logging.error("Error getting CPU usage for {}: {}".format(EXECUTABLE_NAME, e))
-        return None
-
-
-
-def detect_cd_drives():
-    """Returns a list of drive letters for all detected CD/DVD drives."""
-    cd_drives = []
-    try:
-        # Run WMIC with explicit stdin/stdout handling to prevent hangs
-        process = subprocess.Popen(
-            "wmic cdrom get drive",
-            shell=True,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE
-        )
-        output, error = process.communicate()
-
-        # Decode and process output safely
-        lines = output.decode("utf-8", errors="ignore").splitlines()
-
-        for line in lines[1:]:  # Skip the header
-            drive_letter = line.strip()
-            if drive_letter and len(drive_letter) == 2 and drive_letter[1] == ":":
-                cd_drives.append(drive_letter[0])  # Extract just the letter
-    except Exception as e:
-        logging.error("Error detecting CD/DVD drives: {}".format(e))
-
-    return cd_drives
-
-
-
-
-
-
-def input_watcher():
-    """Monitors both mouse and keyboard inputs in a single thread."""
-    global last_mouse_click_time, last_keyboard_input_time
-    prev_mouse_state = 0
-    prev_keys = [0] * 256
-
-    while True:
-        now = time.time()
-
-        # Check mouse click
-        mouse_state = user32.GetAsyncKeyState(VK_LBUTTON) & 0x8000
-        if mouse_state and not prev_mouse_state:
-            last_mouse_click_time = now
-        prev_mouse_state = mouse_state
-
-        # Check keyboard input
-        for key_code in range(8, 256):  # Valid key range
-            key_state = user32.GetAsyncKeyState(key_code) & 0x8000
-            if key_state and not prev_keys[key_code]:
-                last_keyboard_input_time = now
-            prev_keys[key_code] = key_state
-
-        time.sleep(0.01)  # Poll frequently without excessive CPU usage
-
-
-def run_wmplayer_on_cd(drive_letter):
-    """Launches the media player for the given CD drive and monitors activity."""
-    logging.info("Starting {} for CD in drive {}:\\".format(EXECUTABLE_NAME, drive_letter))
-
-    # Use cmd.exe to launch wmplayer properly
-    command = 'start "" "{}" /device:AudioCD "{}:\\"'.format(EXECUTABLE_NAME, drive_letter)
-
-    try:
-        process = subprocess.Popen(command, shell=True, creationflags=subprocess.CREATE_NEW_CONSOLE)
-        logging.info("Started {} for drive {}:\\".format(EXECUTABLE_NAME, drive_letter))
-    except Exception as e:
-        logging.error("Failed to start {}: {}".format(EXECUTABLE_NAME, e))
-        return
-
-    time.sleep(5)  # Allow wmplayer to start
-
-    logging.info("Monitoring CPU and input activity...")  # Added log to ensure we reach this part
-
-    while True:
-        start_time = time.time()
-        cpu_usage_records = []
-
-        while time.time() - start_time < 10:  # Monitor CPU usage for 10 seconds
-            cpu_usage = get_process_cpu_usage()
-            now = time.time()
-            seconds_since_mouse = int(now - last_mouse_click_time)
-            seconds_since_keyboard = int(now - last_keyboard_input_time)
-
-            if cpu_usage is None:
-                logging.info("{} is no longer running. Moving to next CD drive.".format(EXECUTABLE_NAME))
-                return
-
-            cpu_usage_records.append(cpu_usage)
-            logging.info("CPU Usage: {} | No input for {}s (mouse), {}s (keyboard)".format(
-                round(cpu_usage / 100000, 2), seconds_since_mouse, seconds_since_keyboard
-            ))
-
-            time.sleep(1)  # Check every second
-
-        # Determine if the CD has finished playing
-        if len(set(cpu_usage_records)) == 1 and seconds_since_mouse >= 10 and seconds_since_keyboard >= 10:
-            logging.info("CD in drive {}:\\ appears to have finished playing. Terminating {}.".format(
-                drive_letter, EXECUTABLE_NAME))
-            subprocess.call("taskkill /F /IM {}".format(EXECUTABLE_NAME), shell=True)
-            time.sleep(5)  # Wait before moving to the next CD
+    def run_wmplayer_on_cd(self, drive_letter):
+        """Launches the media player for the given CD drive and monitors CPU usage."""
+        logging.info("Starting {} for CD in drive {}:\\".format(self.EXECUTABLE_NAME, drive_letter))
+        command = 'start "" "{}" /device:AudioCD "{}:\\"'.format(self.EXECUTABLE_NAME, drive_letter)
+        try:
+            process = subprocess.Popen(command, shell=True, creationflags=subprocess.CREATE_NEW_CONSOLE)
+            logging.info("Started {} for drive {}:\\".format(self.EXECUTABLE_NAME, drive_letter))
+        except Exception as e:
+            logging.error("Failed to start {}: {}".format(self.EXECUTABLE_NAME, e))
             return
 
+        time.sleep(5)  # Allow wmplayer to start
+        logging.info("Monitoring CPU usage. Press ENTER to toggle monitoring (currently enabled).")
 
+        while True:
+            if not self.watch_cpu_usage:
+                time.sleep(self.WATCH_CPU_USAGE_CHECK_INTERVAL_SECONDS)
+                continue
 
-def main():
-    # Kill any existing process before starting
-    kill_existing_process()
+            cpu_usage = self.get_process_cpu_usage()
+            if cpu_usage is None:
+                logging.info("{} is no longer running. Moving to next CD drive.".format(self.EXECUTABLE_NAME))
+                return
 
-    logging.info("Detecting CD/DVD drives...")
-    cd_drives = detect_cd_drives()
+            self.cpu_usage_records.append(cpu_usage)
+            if len(self.cpu_usage_records) > self.MAX_CONSECUTIVE_IDENTICAL_CPU_READINGS:
+                self.cpu_usage_records.pop(0)
+            logging.info("CPU Usage: {}".format(round(cpu_usage / 100000, 2)))
 
-    if not cd_drives:
-        logging.info("No CD/DVD drives detected. Exiting early.")
-        return
+            # If the last MAX_CONSECUTIVE_IDENTICAL_CPU_READINGS CPU usage readings are identical, assume the CD has finished.
+            if len(self.cpu_usage_records) == self.MAX_CONSECUTIVE_IDENTICAL_CPU_READINGS and len(set(self.cpu_usage_records)) == 1:
+                logging.info("CD in drive {}:\\ appears to have finished playing. Terminating {}.".format(
+                    drive_letter, self.EXECUTABLE_NAME))
+                subprocess.call("taskkill /F /IM {}".format(self.EXECUTABLE_NAME), shell=True)
+                time.sleep(5)
+                return
 
-    logging.info("Detected {} CD/DVD drives. Starting to play using drives: {}".format(len(cd_drives), ", ".join(cd_drives)))
+            time.sleep(self.WATCH_CPU_USAGE_CHECK_INTERVAL_SECONDS)
 
-    for drive in cd_drives:
-        run_wmplayer_on_cd(drive)
-    logging.info("Finished playing all {} CDs.".format(len(cd_drives)))
+    def run(self):
+        """Main routine to manage CD playback across detected drives."""
+        self.kill_existing_process()
+        logging.info("Detecting CD/DVD drives...")
+        cd_drives = self.detect_cd_drives()
+        if not cd_drives:
+            logging.info("No CD/DVD drives detected. Exiting early.")
+            return
+        logging.info(
+            "Detected {} CD/DVD drives. Starting to play using drives: {}".format(len(cd_drives), ", ".join(cd_drives)))
+        for drive in cd_drives:
+            self.run_wmplayer_on_cd(drive)
+        logging.info("Finished playing all {} CDs.".format(len(cd_drives)))
 
 
 if __name__ == '__main__':
-    threading.Thread(target=input_watcher, daemon=True).start()
-
+    monitor = CDMonitor()
+    threading.Thread(target=monitor.toggle_listener, daemon=True).start()
     try:
-        main()
+        monitor.run()
     except KeyboardInterrupt:
         logging.info("Exiting...")
